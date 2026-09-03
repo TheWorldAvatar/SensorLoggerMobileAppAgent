@@ -3,17 +3,7 @@
         "Name": "sensorloggermobileappagent",
         "TaskTemplate": {
             "ContainerSpec": {
-                "Image": "ghcr.io/cambridge-cares/sensorloggermobileappagent:5.0.0-activity-data-SNAPSHOT",
-                "Env": [
-                    "TRAJECTORY_LOOKUP_TABLE=trajectory_lookup_table"
-                ],
-                "Mounts": [
-                    {
-                        "Type": "bind",
-                        "Source": "../../../../../../Agents/SensorLoggerMobileAppAgent/sensorloggermobileappagent/src/main/resources",
-                        "Target": "/resources"
-                    }
-                ],
+                "Image": "ghcr.io/theworldavatar/sensorloggermobileappagent:6.0.0",
                 "Configs": [
                     {
                         "ConfigName": "blazegraph"
