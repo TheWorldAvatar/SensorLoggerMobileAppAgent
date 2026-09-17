@@ -1,4 +1,4 @@
 services:
   sensorloggermobileappagent:
-    image: ghcr.io/theworldavatar/sensorloggermobileappagent:6.0.0
+    image: ghcr.io/theworldavatar/sensorloggermobileappagent:6.1.0-3-add-authentication-for-timeline-SNAPSHOT
     build: .

@@ -16,7 +16,8 @@ WORKDIR /root/code
 
 COPY sensorloggermobileappagent/pom.xml ./pom.xml
 
-RUN --mount=type=cache,id=m2-cache,target=/root/.m2/repository,sharing=locked mvn dependency:resolve
+RUN --mount=type=cache,id=m2-cache,target=/root/.m2/repository,sharing=locked \
+    mvn -B -U dependency:resolve
 
 #==================================================================================================
 # Second stage: build war file
@@ -28,7 +29,8 @@ COPY --from=retriever /root/.m2 /root/.m2
 WORKDIR /root/code
 COPY sensorloggermobileappagent /root/code
 
-RUN --mount=type=cache,id=m2-cache,target=/root/.m2/repository,sharing=locked mvn package -DskipTests -U
+RUN --mount=type=cache,id=m2-cache,target=/root/.m2/repository,sharing=locked \
+    mvn -B package -DskipTests
 
 #==================================================================================================
 # Third stage: copy the downloaded dependency into a new image and build into an app
