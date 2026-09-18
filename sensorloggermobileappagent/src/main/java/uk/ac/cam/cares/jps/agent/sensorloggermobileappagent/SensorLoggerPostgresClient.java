@@ -15,6 +15,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
@@ -55,6 +57,18 @@ public class SensorLoggerPostgresClient {
 
     DSLContext getContext(Connection conn) {
         return DSL.using(conn, SQLDialect.POSTGRES);
+    }
+
+    boolean isPhoneOwnedByUser(String phoneId, String userId) throws SQLException {
+        String sql = "SELECT EXISTS (SELECT 1 FROM timeline.\"smartPhone\" "
+                + "WHERE phone_id = ? AND user_id = ?)";
+        try (Connection conn = getConnection(); PreparedStatement statement = conn.prepareStatement(sql)) {
+            statement.setString(1, phoneId);
+            statement.setString(2, userId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() && result.getBoolean(1);
+            }
+        }
     }
 
     boolean populateTable(String deviceId, List<String> sensorClass) {

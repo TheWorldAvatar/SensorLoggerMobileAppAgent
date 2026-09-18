@@ -184,6 +184,30 @@ The SensorLogger mobile application can downloaded either from [GooglePlay](http
 3) Replace `<LOCAL-URL>` with the same network connected from both your local environment and your phone. `<LOCAL-URL>` can be obtained from the IPv4 Address under Wireless LAN adapter Wi-Fi of your server by running `ipconfig` on command prompt.
 
 ## 3. Agent Configuration 
+### Timeline authentication
+
+The authenticated timeline endpoint requires these environment variables:
+
+- `KEYCLOAK_SERVER`: base URL of the Keycloak server, including any context path.
+- `KEYCLOAK_REALM`: realm that issues timeline access tokens.
+
+`POST /sensorloggermobileappagent/update_for_timeline` accepts the same JSON body as
+`/update` and additionally requires an access token:
+
+```http
+Authorization: Bearer <ACCESS_TOKEN>
+```
+
+Example:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data @payload.json \
+  http://localhost:3838/sensorloggermobileappagent/update_for_timeline
+```
+
 #### Downsampling frequency
 The downsampling method and frequency for the different measurements can be configured in [config.properties](sensorloggermobileappagent/src/main/resources/config.properties).
 - `DSResolution` sets the time interval in seconds of the timeseries data to be downsampled.
