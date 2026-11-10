@@ -22,7 +22,7 @@ public class SmartphoneRecordingTaskTest {
     SmartphoneRecordingTask task;
 
     @Before
-    public void setup() {
+    public void setup() throws Exception {
         RemoteStoreClient storeClientMock = mock(RemoteStoreClient.class);
         when(storeClientMock.executeQuery(ArgumentMatchers.anyString())).thenReturn(new JSONArray());
 
@@ -38,6 +38,12 @@ public class SmartphoneRecordingTaskTest {
         String deviceId = "123";
         task = new SmartphoneRecordingTask(storeClientMock, rdbStoreClientMock, agentConfigMock, deviceId,
                 storeClientMock);
+        // Timing assertions start after potentially slow class/KG initialization.
+        for (String name : List.of("lastProcessedTime", "lastActiveTime")) {
+            java.lang.reflect.Field field = SmartphoneRecordingTask.class.getDeclaredField(name);
+            field.setAccessible(true);
+            field.setLong(task, System.currentTimeMillis());
+        }
     }
 
     @Test
@@ -70,5 +76,11 @@ public class SmartphoneRecordingTaskTest {
     @Test
     public void shouldNotTerminateTask() {
         assertFalse(task.shouldTerminateTask());
+    }
+    @Test
+    public void activityProcessorIsRegistered() {
+        assertNotNull(task.activityProcessor);
+        assertTrue(task.sensorDataProcessors.stream().anyMatch(p -> p instanceof
+                uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.processor.ActivityProcessor));
     }
 }

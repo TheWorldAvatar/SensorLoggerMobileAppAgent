@@ -114,6 +114,12 @@ public class LocationDataProcessor extends SensorDataProcessor {
         this.session.setDataIri(queryResult.getJSONObject(0).optString("session"));
     }
 
+    public String getPointIri() { return geomLocation.getDataIri(); }
+    public String getSpeedIri() { return speed.getDataIri(); }
+    public String getAltitudeIri() { return altitude.getDataIri(); }
+    public String getBearingIri() { return bearing.getDataIri(); }
+    public String getSessionIri() { return session.getDataIri(); }
+
     @Override
     public String getOntodeviceLabel() {
         return "GPSDevice";

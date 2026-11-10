@@ -88,6 +88,9 @@ public class ActivityProcessor extends SensorDataProcessor {
         this.activityType.setDataIri(queryResult.getJSONObject(0).optString("activityType"));
     }
 
+    public String getActivityTypeIri() { return activityType.getDataIri(); }
+    public String getConfidenceIri() { return confidence.getDataIri(); }
+
     @Override
     public String getOntodeviceLabel() {
         return "Activity";
