@@ -1,2 +1,6 @@
 Dockerfile
 docker-compose.yml
+.git
+.vscode
+**/target
+**/output

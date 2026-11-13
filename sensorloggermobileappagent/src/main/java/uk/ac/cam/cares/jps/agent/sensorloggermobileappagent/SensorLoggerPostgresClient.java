@@ -52,7 +52,13 @@ public class SensorLoggerPostgresClient {
             LOGGER.error(e.getMessage());
             LOGGER.error("Failed to load Postgres driver");
         }
-        return DriverManager.getConnection(dburl, dbuser, dbpassword);
+        java.util.Properties properties = new java.util.Properties();
+        if (dbuser != null) properties.setProperty("user", dbuser);
+        if (dbpassword != null) properties.setProperty("password", dbpassword);
+        properties.setProperty("connectTimeout", "10");
+        properties.setProperty("socketTimeout", "60");
+        properties.setProperty("tcpKeepAlive", "true");
+        return DriverManager.getConnection(dburl, properties);
     }
 
     DSLContext getContext(Connection conn) {
@@ -63,6 +69,7 @@ public class SensorLoggerPostgresClient {
         String sql = "SELECT EXISTS (SELECT 1 FROM timeline.\"smartPhone\" "
                 + "WHERE phone_id = ? AND user_id = ?)";
         try (Connection conn = getConnection(); PreparedStatement statement = conn.prepareStatement(sql)) {
+            statement.setQueryTimeout(15);
             statement.setString(1, phoneId);
             statement.setString(2, userId);
             try (ResultSet result = statement.executeQuery()) {

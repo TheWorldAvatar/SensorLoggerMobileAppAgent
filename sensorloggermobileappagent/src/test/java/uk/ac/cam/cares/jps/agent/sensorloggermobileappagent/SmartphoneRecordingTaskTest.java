@@ -83,4 +83,35 @@ public class SmartphoneRecordingTaskTest {
         assertTrue(task.sensorDataProcessors.stream().anyMatch(p -> p instanceof
                 uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.processor.ActivityProcessor));
     }
+
+    @Test
+    public void initializationFailurePropagatesAndAlwaysReleasesProcessingFlag() throws Exception {
+        var processor = mock(uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.processor.SensorDataProcessor.class);
+        when(processor.isNeedToInstantiateDevice()).thenThrow(new IllegalStateException("initialization unavailable"));
+        task.sensorDataProcessors = List.of(processor);
+        try { task.processAndSendData(); fail("Failure must reach durable queue worker"); }
+        catch (IllegalStateException expected) { }
+        var field = SmartphoneRecordingTask.class.getDeclaredField("isProcessing");
+        field.setAccessible(true);
+        assertFalse(field.getBoolean(task));
+    }
+
+    @Test
+    public void shutdownInterruptionStopsDeviceInitialization() throws Exception {
+        var field = SmartphoneRecordingTask.class.getDeclaredField("sensorLoggerPostgresClient");
+        field.setAccessible(true);
+        field.set(task, mock(SensorLoggerPostgresClient.class));
+        var initialize = SmartphoneRecordingTask.class.getDeclaredMethod("initDeviceKgUsingOntop", List.class);
+        initialize.setAccessible(true);
+        Thread.currentThread().interrupt();
+        try {
+            initialize.invoke(task, List.of());
+            fail("Interrupted worker must leave the upload on disk");
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            assertTrue(e.getCause().getCause() instanceof InterruptedException);
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+    }
 }

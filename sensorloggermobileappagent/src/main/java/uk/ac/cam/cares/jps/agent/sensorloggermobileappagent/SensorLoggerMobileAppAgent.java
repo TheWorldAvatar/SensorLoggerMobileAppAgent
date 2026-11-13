@@ -14,19 +14,10 @@ import javax.servlet.annotation.WebServlet;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Timer;
-import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.zip.GZIPInputStream;
@@ -45,9 +36,11 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
     private SensorLoggerPostgresClient postgresClient;
     private TimelineAuthentication timelineAuthentication;
     private AgentConfig agentConfig;
-    private ExecutorService addDataExecutor;
+    private UploadQueueConfig queueConfig;
+    private DiskUploadQueue uploadQueue;
+    private volatile boolean stopping;
     private ExecutorService sendDataExecutor;
-    private static final HashMap<String, SmartphoneRecordingTask> smartphoneHashmap = new HashMap<>();
+
 
     @Override
     public void init() throws ServletException {
@@ -63,38 +56,15 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
         storeClient = new RemoteStoreClient(endpointConfig.getKgurl(), endpointConfig.getKgurl());
         ontopClient = new RemoteStoreClient(endpointConfig.getOntopUrl());
 
-        addDataExecutor = Executors.newFixedThreadPool(5);
-        sendDataExecutor = Executors.newFixedThreadPool(5);
-
-        Timer taskScanningTimer = new Timer();
-        taskScanningTimer.schedule(new TimerTask() {
-            @Override
-            public void run() {
-                synchronized (smartphoneHashmap) {
-                    List<String> inactiveTask = new ArrayList<>();
-                    for (Map.Entry<String, SmartphoneRecordingTask> entry : smartphoneHashmap.entrySet()) {
-                        SmartphoneRecordingTask task = entry.getValue();
-                        String deviceId = entry.getKey();
-
-                        if (task.shouldTerminateTask()) {
-                            LOGGER.info(deviceId + ": flush all data out");
-                            sendDataExecutor.submit(task::processAndSendData);
-                            inactiveTask.add(deviceId);
-                        } else if (task.shouldProcessData()) {
-                            sendDataExecutor.submit(task::processAndSendData);
-                        }
-                    }
-
-                    if (!inactiveTask.isEmpty()) {
-                        LOGGER.info(String.format("tasks: %s are inactive and has been removed from the hashmap",
-                                String.join(",", inactiveTask)));
-                        inactiveTask.forEach(smartphoneHashmap::remove);
-                    }
-                }
-            }
-        }, agentConfig.getTimerDelay() * 1000L, agentConfig.getTimerFrequency() * 1000L);
+        queueConfig = new UploadQueueConfig();
+        try {
+            uploadQueue = new DiskUploadQueue(queueConfig.directory, queueConfig.maxBytes, queueConfig.reserveBytes);
+        } catch (IOException e) {
+            throw new ServletException("Unable to open persistent upload queue", e);
+        }
+        sendDataExecutor = Executors.newFixedThreadPool(queueConfig.workers);
+        for (int i = 0; i < queueConfig.workers; i++) sendDataExecutor.submit(this::consumeUploads);
     }
-
     @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
         response.setContentType("application/json");
@@ -103,6 +73,9 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
         JSONObject requestParams;
         try {
             requestParams = readJsonBody(request);
+        } catch (RequestTooLargeException e) {
+            writeResponse(response, 413, "Request exceeds upload size limit");
+            return;
         } catch (JSONException e) {
             writeResponse(response, HttpServletResponse.SC_BAD_REQUEST, "Malformed JSON request body");
             return;
@@ -146,64 +119,124 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
             return;
         }
 
-        String deviceId = requestParams.getString("deviceId");
-        if (authenticate && !authorizeTimelineRequest(request, response, deviceId)) {
+        String userId = null;
+        long started = System.nanoTime();
+        if (authenticate) {
+            try {
+                userId = timelineAuthentication.authenticate(request.getHeader("Authorization"));
+            } catch (TimelineAuthentication.AuthenticationException e) {
+                response.setHeader("WWW-Authenticate", "Bearer");
+                writeResponse(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+                return;
+            }
+        }
+        long authenticated = System.nanoTime();
+        try {
+            uploadQueue.enqueue(requestParams, userId);
+        } catch (IOException e) {
+            LOGGER.warn("Unable to durably enqueue upload", e);
+            response.setHeader("Retry-After", "5");
+            writeResponse(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "Upload queue unavailable; retry later");
             return;
         }
-
-        String sessionId = requestParams.getString("sessionId");
-        LOGGER.info("{}: receive request", deviceId);
-        SmartphoneRecordingTask task = getSmartphoneRecordingTask(deviceId);
-        addDataExecutor.submit(() -> addData(requestParams, deviceId, sessionId, task));
-
-        LOGGER.info("{} data being added", deviceId);
-        writeResponse(response, HttpServletResponse.SC_OK, "data being processed");
+        LOGGER.info("Upload accepted device={} session={} message={} authenticationMs={} enqueueMs={} queueBytes={}",
+                requestParams.getString("deviceId"), requestParams.getString("sessionId"), requestParams.get("messageId"),
+                (authenticated - started) / 1000000, (System.nanoTime() - authenticated) / 1000000, uploadQueue.sizeBytes());
+        writeResponse(response, HttpServletResponse.SC_ACCEPTED, "Upload durably accepted for processing");
     }
 
-    private boolean authorizeTimelineRequest(HttpServletRequest request, HttpServletResponse response,
-            String deviceId) throws IOException {
-        final String userId;
-        try {
-            userId = timelineAuthentication.authenticate(request.getHeader("Authorization"));
-        } catch (TimelineAuthentication.AuthenticationException e) {
-            LOGGER.warn(e.getMessage());
-            response.setHeader("WWW-Authenticate", "Bearer");
-            writeResponse(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-            return false;
-        }
-
-        try {
-            if (!postgresClient.isPhoneOwnedByUser(deviceId, userId)) {
-                writeResponse(response, HttpServletResponse.SC_FORBIDDEN,
-                        "Device is not registered to the authenticated user");
-                return false;
-            }
-        } catch (SQLException e) {
-            LOGGER.error("Failed to verify ownership for device {}", deviceId, e);
-            writeResponse(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                    "Unable to verify device ownership");
-            return false;
-        }
-        return true;
+    private static class RejectedUpload extends RuntimeException {
+        RejectedUpload(String message) { super(message); }
     }
 
-    private void addData(JSONObject requestParams, String deviceId, String sessionId, SmartphoneRecordingTask task) {
-        try {
-            final JSONArray payload;
-            if (requestParams.has("compressedData")) {
-                LOGGER.info("{} is fetched and start to add data", deviceId);
-                byte[] compressedData = Base64.getDecoder().decode(requestParams.getString("compressedData"));
-                payload = new JSONArray(decompressGzip(compressedData));
-            } else {
-                payload = requestParams.getJSONArray("payload");
-                LOGGER.info("{} is fetched and start to add data", deviceId);
+    private void consumeUploads() {
+        while (!stopping && !Thread.currentThread().isInterrupted()) {
+            DiskUploadQueue.Entry entry = null;
+            try {
+                entry = uploadQueue.claim();
+                if (entry == null) {
+                    Thread.sleep(250);
+                    continue;
+                }
+                processUpload(entry);
+                uploadQueue.complete(entry);
+                LOGGER.info("Upload committed: {}", entry.path.getFileName());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                LOGGER.error("Upload processing failed: {}", entry == null ? "queue scan" : entry.path.getFileName(), e);
+                if (entry != null) {
+                    try {
+                        uploadQueue.fail(entry, e, e instanceof RejectedUpload, queueConfig.maxAttempts,
+                                queueConfig.retryBaseMillis, queueConfig.retryMaxMillis);
+                    } catch (IOException failure) {
+                        LOGGER.error("Unable to record retry; original upload remains on disk", failure);
+                        // Do not hot-loop on an unavailable spool.
+                        try { Thread.sleep(1000); } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt(); return;
+                        }
+                    }
+                } else {
+                    try { Thread.sleep(1000); } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt(); return;
+                    }
+                }
+            } finally {
+                if (entry != null) uploadQueue.release(entry);
             }
-            task.addData(new Payload(payload, sessionId));
+        }
+    }
+
+    private void processUpload(DiskUploadQueue.Entry entry) throws Exception {
+        JSONObject request = entry.record.getJSONObject("request");
+        String deviceId = entry.deviceId();
+        if (entry.record.has("userId")
+                && !postgresClient.isPhoneOwnedByUser(deviceId, entry.record.getString("userId"))) {
+            throw new RejectedUpload("Device is not registered to the authenticated user");
+        }
+        final JSONArray payload;
+        try {
+            payload = request.has("compressedData")
+                    ? new JSONArray(decompressGzip(Base64.getDecoder().decode(request.getString("compressedData"))))
+                    : request.getJSONArray("payload");
         } catch (IOException | JSONException | IllegalArgumentException e) {
-            LOGGER.error("Failed to add data for device {}", deviceId, e);
+            throw new RejectedUpload("Invalid compressed sensor payload: " + e.getMessage());
         }
+        SmartphoneRecordingTask task = new SmartphoneRecordingTask(storeClient, rdbStoreClient, agentConfig,
+                deviceId, ontopClient);
+        try {
+            task.addData(new Payload(payload, request.getString("sessionId")));
+        } catch (JSONException | IllegalArgumentException e) {
+            throw new RejectedUpload("Invalid sensor readings: " + e.getMessage());
+        }
+        task.processAndSendData();
     }
 
+    @Override
+    public void destroy() {
+        stopping = true;
+        if (sendDataExecutor != null) {
+            sendDataExecutor.shutdown();
+            try {
+                if (!sendDataExecutor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                    sendDataExecutor.shutdownNow();
+                    if (!sendDataExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        LOGGER.error("Upload workers still running; retaining queue lock until process exits");
+                        return;
+                    }
+                }
+            } catch (InterruptedException e) {
+                sendDataExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        if (uploadQueue != null) {
+            try { uploadQueue.close(); } catch (IOException e) { LOGGER.error("Unable to close upload queue", e); }
+        }
+        super.destroy();
+    }
     boolean validateInput(JSONObject requestParams) {
         if (!requestParams.has("messageId") || !requestParams.has("sessionId") || !requestParams.has("deviceId")
                 || (!requestParams.has("payload") && !requestParams.has("compressedData"))) {
@@ -224,15 +257,19 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
     }
 
     private JSONObject readJsonBody(HttpServletRequest request) throws IOException {
-        StringBuilder body = new StringBuilder();
-        try (BufferedReader reader = request.getReader()) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                body.append(line);
-            }
+        long started = System.nanoTime();
+        if (request.getContentLengthLong() > queueConfig.requestBytes) throw new RequestTooLargeException();
+        try (java.io.InputStream input = request.getInputStream()) {
+            byte[] body = input.readNBytes(queueConfig.requestBytes + 1);
+            if (body.length > queueConfig.requestBytes) throw new RequestTooLargeException();
+            JSONObject result = new JSONObject(new String(body, StandardCharsets.UTF_8));
+            LOGGER.info("Upload request read/JSON parse: bytes={} elapsedMs={}", body.length,
+                    (System.nanoTime() - started) / 1000000);
+            return result;
         }
-        return new JSONObject(body.toString());
     }
+
+    private static class RequestTooLargeException extends IOException { }
 
     private void writeResponse(HttpServletResponse response, int status, String message) throws IOException {
         response.setStatus(status);
@@ -240,29 +277,10 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
     }
 
     private String decompressGzip(byte[] compressedData) throws IOException {
-        try (GZIPInputStream gzipInputStream = new GZIPInputStream(new ByteArrayInputStream(compressedData));
-                InputStreamReader inputStreamReader = new InputStreamReader(gzipInputStream, StandardCharsets.UTF_8);
-                BufferedReader bufferedReader = new BufferedReader(inputStreamReader)) {
-            StringBuilder outStr = new StringBuilder();
-            String line;
-            while ((line = bufferedReader.readLine()) != null) {
-                outStr.append(line);
-            }
-            return outStr.toString();
-        }
-    }
-
-    private SmartphoneRecordingTask getSmartphoneRecordingTask(String deviceId) {
-        synchronized (smartphoneHashmap) {
-            if (smartphoneHashmap.containsKey(deviceId)) {
-                return smartphoneHashmap.get(deviceId);
-            }
-
-            LOGGER.info("{}: creating new task", deviceId);
-            SmartphoneRecordingTask task = new SmartphoneRecordingTask(storeClient, rdbStoreClient, agentConfig,
-                    deviceId, ontopClient);
-            smartphoneHashmap.put(deviceId, task);
-            return task;
+        try (GZIPInputStream input = new GZIPInputStream(new ByteArrayInputStream(compressedData))) {
+            byte[] data = input.readNBytes(queueConfig.decompressedBytes + 1);
+            if (data.length > queueConfig.decompressedBytes) throw new IOException("Decompressed payload exceeds limit");
+            return new String(data, StandardCharsets.UTF_8);
         }
     }
 

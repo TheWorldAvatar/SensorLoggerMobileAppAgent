@@ -107,44 +107,32 @@ public class SmartphoneRecordingTask {
 
     public synchronized void processAndSendData() {
         isProcessing = true;
-
-        logger.info("Processing and sending data");
-
-        List<SensorDataProcessor> processorsToInstantiate = sensorDataProcessors.stream()
-                .filter(SensorDataProcessor::isNeedToInstantiateDevice).toList();
-        if (!processorsToInstantiate.isEmpty()) {
-            logger.info("Need to init device: " + processorsToInstantiate.stream()
-                    .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
-            initDeviceKgUsingOntop(processorsToInstantiate);
-        }
-
-        List<SensorDataProcessor> processorsToInitTimeSeries = sensorDataProcessors.stream()
-                .filter(SensorDataProcessor::isNeedToInitTimeSeries).toList();
-        if (!processorsToInitTimeSeries.isEmpty()) {
-            logger.info("Need to init rdb for " + processorsToInitTimeSeries.stream()
-                    .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
-            initDevicesInRDB();
-        }
-
-        fixUninitializedSensorData();
-
         try {
+            logger.info("Processing and sending data");
+
+            List<SensorDataProcessor> processorsToInstantiate = sensorDataProcessors.stream()
+                    .filter(SensorDataProcessor::isNeedToInstantiateDevice).toList();
+            if (!processorsToInstantiate.isEmpty()) {
+                logger.info("Need to init device: " + processorsToInstantiate.stream()
+                        .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
+                initDeviceKgUsingOntop(processorsToInstantiate);
+            }
+
+            List<SensorDataProcessor> processorsToInitTimeSeries = sensorDataProcessors.stream()
+                    .filter(SensorDataProcessor::isNeedToInitTimeSeries).toList();
+            if (!processorsToInitTimeSeries.isEmpty()) {
+                logger.info("Need to init rdb for " + processorsToInitTimeSeries.stream()
+                        .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
+                initDevicesInRDB();
+            }
+
+            fixUninitializedSensorData();
+
             bulkAddTimeSeriesData();
-        } catch (RuntimeException e) {
+        } finally {
             lastProcessedTime = System.currentTimeMillis();
             isProcessing = false;
-
-            logger.error(e.getMessage());
-            logger.error(e.getCause());
-            logger.error(
-                    "Failed to process, release isProcessing and update the processed time to " + lastProcessedTime);
-            return;
         }
-
-        lastProcessedTime = System.currentTimeMillis();
-        logger.info("Done with sending data, and update the processed time to " + lastProcessedTime);
-
-        isProcessing = false;
     }
 
     public synchronized boolean shouldTerminateTask() {
@@ -208,6 +196,7 @@ public class SmartphoneRecordingTask {
             Thread.sleep(30000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted during device initialization", e);
         }
 
         sensorDataProcessors.forEach(s -> s.initIRIs());

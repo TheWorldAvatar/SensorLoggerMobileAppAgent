@@ -21,7 +21,7 @@ public class SensorLoggerMobileAppAgentTest {
         object.put("messageId", "1");
         object.put("sessionId", "1");
         object.put("deviceId", "123");
-        object.put("payload", "");
+        object.put("payload", new org.json.JSONArray());
 
         assertTrue(agent.validateInput(object));
     }
