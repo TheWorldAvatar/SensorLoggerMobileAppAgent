@@ -28,6 +28,9 @@ public class TrajectoryTableWriter {
         try (InputStream input = new ClassPathResource("trajectory_tables.sql").getInputStream();
                 Statement statement = connection.createStatement()) {
             statement.execute(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            try (InputStream cache = new ClassPathResource("date_cache.sql").getInputStream()) {
+                statement.execute(new String(cache.readAllBytes(), StandardCharsets.UTF_8));
+            }
             initialized = true;
         } catch (IOException e) {
             throw new SQLException("Cannot read trajectory table schema", e);
@@ -61,6 +64,22 @@ public class TrajectoryTableWriter {
                 writeActivities(connection, deviceId, batch, activity);
             }
         }
+        // Only convert this batch's GPS points, for timezones requested previously.
+        // The caller holds the same device lock used by lazy cache backfills.
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO public.device_available_dates(device_id, timezone, local_date)
+                SELECT DISTINCT p.device_id, c.timezone,
+                    (to_timestamp(p.time / 1000.0) AT TIME ZONE c.timezone)::date
+                FROM trajectory_dirty_points d
+                JOIN public.trajectory_points p ON p.source_time = d.source_time
+                JOIN public.device_date_cache c ON c.device_id = p.device_id
+                WHERE p.device_id = ?
+                ON CONFLICT DO NOTHING
+                """)) {
+            statement.setString(1, deviceId);
+            statement.executeUpdate();
+        }
+
         // Both arrival orders, including corrections, use the same nearest rule.
         // Indexed ranges restrict work before sorting by absolute distance.
         try (PreparedStatement statement = connection.prepareStatement("""
