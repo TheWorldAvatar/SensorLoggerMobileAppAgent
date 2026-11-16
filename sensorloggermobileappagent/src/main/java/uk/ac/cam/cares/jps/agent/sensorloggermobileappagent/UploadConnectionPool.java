@@ -14,6 +14,8 @@ final class UploadConnectionPool {
     static HikariConfig configure(String url, String user, String password, int workers) {
         HikariConfig config = new HikariConfig();
         config.setPoolName("sensorlogger-uploads");
+        // Load through Hikari's/webapp class loader instead of relying on DriverManager discovery.
+        config.setDriverClassName("org.postgresql.Driver");
         config.setJdbcUrl(url);
         config.setUsername(user);
         config.setPassword(password);
