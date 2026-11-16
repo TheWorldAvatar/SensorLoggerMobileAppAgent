@@ -5,7 +5,7 @@
             "ContainerSpec": {
                 "Image": "ghcr.io/theworldavatar/sensorloggermobileappagent:6.1.0",
                 "Env": [
-                    "UPLOAD_QUEUE_DIR=/var/lib/sensorlogger/queue",
+                    "UPLOAD_QUEUE_WORKERS=4",
                     "JAVA_TOOL_OPTIONS=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005",
                     "KEYCLOAK_SERVER=",
                     "KEYCLOAK_REALM="
