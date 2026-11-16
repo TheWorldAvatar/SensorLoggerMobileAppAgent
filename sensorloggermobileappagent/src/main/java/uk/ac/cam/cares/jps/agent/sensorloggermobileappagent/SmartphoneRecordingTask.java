@@ -60,10 +60,23 @@ public class SmartphoneRecordingTask {
 
     public SmartphoneRecordingTask(RemoteStoreClient storeClient, RemoteRDBStoreClient rdbStoreClient,
             AgentConfig config, String deviceId, RemoteStoreClient ontopRemoteStoreClient) {
+        this(storeClient, rdbStoreClient, config, deviceId, ontopRemoteStoreClient,
+                new SensorLoggerPostgresClient(rdbStoreClient.getRdbURL(),
+                        rdbStoreClient.getUser(), rdbStoreClient.getPassword()));
+    }
+
+    public SmartphoneRecordingTask(RemoteStoreClient storeClient, RemoteRDBStoreClient rdbStoreClient,
+            AgentConfig config, String deviceId, RemoteStoreClient ontopRemoteStoreClient,
+            SensorLoggerPostgresClient postgresClient) {
         logger = LogManager.getLogger("SmartphoneRecordingTask_" + deviceId);
+        this.sensorLoggerPostgresClient = java.util.Objects.requireNonNull(postgresClient);
 
         this.ontopRemoteStoreClient = ontopRemoteStoreClient;
-        TimeSeriesRDBClient<Instant> tsRdbClient = new TimeSeriesRDBClient<>(Instant.class);
+        TimeSeriesRDBClient<Instant> tsRdbClient = new TimeSeriesRDBClient<>(Instant.class) {
+            @Override public java.sql.Connection getConnection() throws java.sql.SQLException {
+                return postgresClient.getConnection();
+            }
+        };
         tsRdbClient.setRdbURL(rdbStoreClient.getRdbURL());
         tsRdbClient.setRdbUser(rdbStoreClient.getUser());
         tsRdbClient.setRdbPassword(rdbStoreClient.getPassword());
@@ -80,8 +93,6 @@ public class SmartphoneRecordingTask {
 
         initSensorProcessors();
 
-        sensorLoggerPostgresClient = new SensorLoggerPostgresClient(rdbStoreClient.getRdbURL(),
-                rdbStoreClient.getUser(), rdbStoreClient.getPassword());
     }
 
     public synchronized void addData(Payload data) {

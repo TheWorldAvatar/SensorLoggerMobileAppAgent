@@ -33,6 +33,7 @@ public class SensorLoggerPostgresClient {
     private String dburl;
     private String dbuser;
     private String dbpassword;
+    private javax.sql.DataSource dataSource;
     private static final Table<?> DSL_TABLE = DSL.table(DSL.name(DEVICES_TABLE));
     private static final Field<String> DEVICE_COLUMN_FIELD = DSL.field(DEVICE_COLUMN, String.class);
     private static final Field<String> SENSOR_COLUMN_FIELD = DSL.field(SENSOR_COLUMN, String.class);
@@ -45,7 +46,12 @@ public class SensorLoggerPostgresClient {
         this.dbpassword = dbpassword;
     }
 
+    SensorLoggerPostgresClient(javax.sql.DataSource dataSource) {
+        this.dataSource = java.util.Objects.requireNonNull(dataSource);
+    }
+
     public Connection getConnection() throws SQLException {
+        if (dataSource != null) return dataSource.getConnection();
         try {
             Class.forName("org.postgresql.Driver");
         } catch (ClassNotFoundException e) {

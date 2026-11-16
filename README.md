@@ -186,7 +186,7 @@ The downsampling method and frequency for the different measurements can be conf
 
 #### Persistent upload queue
 
-The disk queue is stored at `/var/lib/sensorlogger/queue` in the container, backed by the `sensorlogger-upload-queue` volume in Stack Manager deployments.
+`UPLOAD_QUEUE_WORKERS` sets the number of concurrent upload workers and the maximum database connection pool size. It defaults to `4` and can be overridden through an environment variable.
 
 ## 4. Deploy
 

@@ -34,6 +34,7 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
     private RemoteStoreClient ontopClient;
     private RemoteRDBStoreClient rdbStoreClient;
     private SensorLoggerPostgresClient postgresClient;
+    private com.zaxxer.hikari.HikariDataSource connectionPool;
     private TimelineAuthentication timelineAuthentication;
     private AgentConfig agentConfig;
     private UploadQueueConfig queueConfig;
@@ -50,16 +51,19 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
         EndpointConfig endpointConfig = new EndpointConfig();
         rdbStoreClient = new RemoteRDBStoreClient(endpointConfig.getDburl(), endpointConfig.getDbuser(),
                 endpointConfig.getDbpassword());
-        postgresClient = new SensorLoggerPostgresClient(endpointConfig.getDburl(), endpointConfig.getDbuser(),
-                endpointConfig.getDbpassword());
+
         timelineAuthentication = new TimelineAuthentication();
         storeClient = new RemoteStoreClient(endpointConfig.getKgurl(), endpointConfig.getKgurl());
         ontopClient = new RemoteStoreClient(endpointConfig.getOntopUrl());
 
         queueConfig = new UploadQueueConfig();
+        connectionPool = UploadConnectionPool.create(endpointConfig.getDburl(), endpointConfig.getDbuser(),
+                endpointConfig.getDbpassword(), queueConfig.workers);
+        postgresClient = new SensorLoggerPostgresClient(connectionPool);
         try {
             uploadQueue = new DiskUploadQueue(queueConfig.directory, queueConfig.maxBytes, queueConfig.reserveBytes);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            connectionPool.close();
             throw new ServletException("Unable to open persistent upload queue", e);
         }
         sendDataExecutor = Executors.newFixedThreadPool(queueConfig.workers);
@@ -106,7 +110,7 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
         }
 
         SmartphoneRecordingTask task = new SmartphoneRecordingTask(storeClient, rdbStoreClient, agentConfig,
-                deviceId, ontopClient);
+                deviceId, ontopClient, postgresClient);
         task.instantiate();
         writeResponse(response, HttpServletResponse.SC_OK, "instantiated deviceId = " + deviceId);
     }
@@ -204,7 +208,7 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
             throw new RejectedUpload("Invalid compressed sensor payload: " + e.getMessage());
         }
         SmartphoneRecordingTask task = new SmartphoneRecordingTask(storeClient, rdbStoreClient, agentConfig,
-                deviceId, ontopClient);
+                deviceId, ontopClient, postgresClient);
         try {
             task.addData(new Payload(payload, request.getString("sessionId")));
         } catch (JSONException | IllegalArgumentException e) {
@@ -216,26 +220,30 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
     @Override
     public void destroy() {
         stopping = true;
-        if (sendDataExecutor != null) {
-            sendDataExecutor.shutdown();
-            try {
-                if (!sendDataExecutor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
-                    sendDataExecutor.shutdownNow();
-                    if (!sendDataExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                        LOGGER.error("Upload workers still running; retaining queue lock until process exits");
-                        return;
+        try {
+            if (sendDataExecutor != null) {
+                sendDataExecutor.shutdown();
+                try {
+                    if (!sendDataExecutor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                        sendDataExecutor.shutdownNow();
+                        if (!sendDataExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                            LOGGER.error("Upload workers still running; retaining queue lock until process exits");
+                            return;
+                        }
                     }
+                } catch (InterruptedException e) {
+                    sendDataExecutor.shutdownNow();
+                    Thread.currentThread().interrupt();
+                    return;
                 }
-            } catch (InterruptedException e) {
-                sendDataExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
-                return;
             }
+            if (uploadQueue != null) {
+                try { uploadQueue.close(); } catch (IOException e) { LOGGER.error("Unable to close upload queue", e); }
+            }
+        } finally {
+            if (connectionPool != null) connectionPool.close();
+            super.destroy();
         }
-        if (uploadQueue != null) {
-            try { uploadQueue.close(); } catch (IOException e) { LOGGER.error("Unable to close upload queue", e); }
-        }
-        super.destroy();
     }
     boolean validateInput(JSONObject requestParams) {
         if (!requestParams.has("messageId") || !requestParams.has("sessionId") || !requestParams.has("deviceId")
