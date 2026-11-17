@@ -49,6 +49,9 @@ public class SmartphoneRecordingTask {
     private final TimeSeriesClient<Instant> tsClient;
     private final AgentConfig config;
 
+    // Prepared batches survive a failed write; newly arriving data stays buffered.
+    private List<TimeSeries<Instant>> pendingTimeSeries;
+    private final TrajectoryTableWriter trajectoryTableWriter = new TrajectoryTableWriter();
     private long lastProcessedTime;
     private long lastActiveTime;
     private boolean isProcessing;
@@ -57,10 +60,23 @@ public class SmartphoneRecordingTask {
 
     public SmartphoneRecordingTask(RemoteStoreClient storeClient, RemoteRDBStoreClient rdbStoreClient,
             AgentConfig config, String deviceId, RemoteStoreClient ontopRemoteStoreClient) {
+        this(storeClient, rdbStoreClient, config, deviceId, ontopRemoteStoreClient,
+                new SensorLoggerPostgresClient(rdbStoreClient.getRdbURL(),
+                        rdbStoreClient.getUser(), rdbStoreClient.getPassword()));
+    }
+
+    public SmartphoneRecordingTask(RemoteStoreClient storeClient, RemoteRDBStoreClient rdbStoreClient,
+            AgentConfig config, String deviceId, RemoteStoreClient ontopRemoteStoreClient,
+            SensorLoggerPostgresClient postgresClient) {
         logger = LogManager.getLogger("SmartphoneRecordingTask_" + deviceId);
+        this.sensorLoggerPostgresClient = java.util.Objects.requireNonNull(postgresClient);
 
         this.ontopRemoteStoreClient = ontopRemoteStoreClient;
-        TimeSeriesRDBClient<Instant> tsRdbClient = new TimeSeriesRDBClient<>(Instant.class);
+        TimeSeriesRDBClient<Instant> tsRdbClient = new TimeSeriesRDBClient<>(Instant.class) {
+            @Override public java.sql.Connection getConnection() throws java.sql.SQLException {
+                return postgresClient.getConnection();
+            }
+        };
         tsRdbClient.setRdbURL(rdbStoreClient.getRdbURL());
         tsRdbClient.setRdbUser(rdbStoreClient.getUser());
         tsRdbClient.setRdbPassword(rdbStoreClient.getPassword());
@@ -77,8 +93,6 @@ public class SmartphoneRecordingTask {
 
         initSensorProcessors();
 
-        sensorLoggerPostgresClient = new SensorLoggerPostgresClient(rdbStoreClient.getRdbURL(),
-                rdbStoreClient.getUser(), rdbStoreClient.getPassword());
     }
 
     public synchronized void addData(Payload data) {
@@ -104,48 +118,38 @@ public class SmartphoneRecordingTask {
 
     public synchronized void processAndSendData() {
         isProcessing = true;
-
-        logger.info("Processing and sending data");
-
-        List<SensorDataProcessor> processorsToInstantiate = sensorDataProcessors.stream()
-                .filter(SensorDataProcessor::isNeedToInstantiateDevice).toList();
-        if (!processorsToInstantiate.isEmpty()) {
-            logger.info("Need to init device: " + processorsToInstantiate.stream()
-                    .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
-            initDeviceKgUsingOntop(processorsToInstantiate);
-        }
-
-        List<SensorDataProcessor> processorsToInitTimeSeries = sensorDataProcessors.stream()
-                .filter(SensorDataProcessor::isNeedToInitTimeSeries).toList();
-        if (!processorsToInitTimeSeries.isEmpty()) {
-            logger.info("Need to init rdb for " + processorsToInitTimeSeries.stream()
-                    .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
-            initDevicesInRDB();
-        }
-
-        fixUninitializedSensorData();
-
         try {
+            logger.info("Processing and sending data");
+
+            List<SensorDataProcessor> processorsToInstantiate = sensorDataProcessors.stream()
+                    .filter(SensorDataProcessor::isNeedToInstantiateDevice).toList();
+            if (!processorsToInstantiate.isEmpty()) {
+                logger.info("Need to init device: " + processorsToInstantiate.stream()
+                        .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
+                initDeviceKgUsingOntop(processorsToInstantiate);
+            }
+
+            List<SensorDataProcessor> processorsToInitTimeSeries = sensorDataProcessors.stream()
+                    .filter(SensorDataProcessor::isNeedToInitTimeSeries).toList();
+            if (!processorsToInitTimeSeries.isEmpty()) {
+                logger.info("Need to init rdb for " + processorsToInitTimeSeries.stream()
+                        .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
+                initDevicesInRDB();
+            }
+
+            fixUninitializedSensorData();
+
             bulkAddTimeSeriesData();
-        } catch (RuntimeException e) {
+        } finally {
             lastProcessedTime = System.currentTimeMillis();
             isProcessing = false;
-
-            logger.error(e.getMessage());
-            logger.error(e.getCause());
-            logger.error(
-                    "Failed to process, release isProcessing and update the processed time to " + lastProcessedTime);
-            return;
         }
-
-        lastProcessedTime = System.currentTimeMillis();
-        logger.info("Done with sending data, and update the processed time to " + lastProcessedTime);
-
-        isProcessing = false;
     }
 
     public synchronized boolean shouldTerminateTask() {
-        return System.currentTimeMillis() - lastActiveTime > config.getTaskInactiveTime() * 1000L;
+        return pendingTimeSeries == null
+                && sensorDataProcessors.stream().allMatch(p -> p.getTimeSeriesLength() == 0)
+                && System.currentTimeMillis() - lastActiveTime > config.getTaskInactiveTime() * 1000L;
     }
 
     private void initSensorProcessors() {
@@ -163,17 +167,17 @@ public class SmartphoneRecordingTask {
                 blazegraphStoreClient, smartphoneIRI);
         relativeBrightnessProcessor = new RelativeBrightnessProcessor(this.config, ontopRemoteStoreClient,
                 blazegraphStoreClient, smartphoneIRI);
-        activityProcessor = new ActivityProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient,
-                smartphoneIRI);
+        // Always preserve raw activity observations in the source time series.
+        activityProcessor = new ActivityProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient, smartphoneIRI);
 
-        sensorDataProcessors = Arrays.asList(accelerometerProcessor,
+        sensorDataProcessors = new ArrayList<>(Arrays.asList(accelerometerProcessor,
                 dbfsDataProcessor,
                 gravityDataProcessor,
                 illuminationProcessor,
                 locationDataProcessor,
                 magnetometerDataProcessor,
                 relativeBrightnessProcessor,
-                activityProcessor);
+                activityProcessor));
     }
 
     private void initDeviceKgUsingOntop(List<SensorDataProcessor> processors) {
@@ -203,6 +207,7 @@ public class SmartphoneRecordingTask {
             Thread.sleep(30000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted during device initialization", e);
         }
 
         sensorDataProcessors.forEach(s -> s.initIRIs());
@@ -264,16 +269,21 @@ public class SmartphoneRecordingTask {
     }
 
     private void bulkAddTimeSeriesData() throws RuntimeException {
-        List<TimeSeries<Instant>> tsList = sensorDataProcessors.stream()
-                .filter(p -> p.getTimeSeriesLength() > 0)
-                .map(p -> {
+        if (pendingTimeSeries == null) {
+            pendingTimeSeries = new ArrayList<>();
+            for (SensorDataProcessor processor : sensorDataProcessors) {
+                if (processor.getTimeSeriesLength() > 0) {
                     try {
-                        return p.getProcessedTimeSeries();
+                        pendingTimeSeries.add(processor.getProcessedTimeSeries());
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
-                }).collect(Collectors.toList());
+                }
+            }
+        }
+        List<TimeSeries<Instant>> tsList = pendingTimeSeries;
         if (tsList.isEmpty() || tsList.stream().mapToInt(ts -> ts.getTimes().size()).sum() == 0) {
+            pendingTimeSeries = null;
             logger.info("No new data, skip bulk add time series data");
             return;
         }
@@ -283,7 +293,29 @@ public class SmartphoneRecordingTask {
         tsList.removeIf(longTimeSeries -> longTimeSeries.getTimes().isEmpty());
 
         logger.info(String.format("bulk adding %d time series", tsList.size()));
-        tsClient.bulkaddTimeSeriesData(tsList);
+        try (java.sql.Connection connection = sensorLoggerPostgresClient.getConnection()) {
+            TrajectoryTableWriter.initialize(connection);
+            connection.setAutoCommit(false);
+            try {
+                logger.info("Waiting for device database lock: {}", deviceId);
+                trajectoryTableWriter.lockDevice(connection, deviceId);
+                logger.info("Writing source time series: {}", deviceId);
+                tsClient.bulkaddTimeSeriesData(tsList, connection);
+                logger.info("Source write finished; writing shared trajectory tables: {}", deviceId);
+                trajectoryTableWriter.write(connection, deviceId, tsList,
+                        locationDataProcessor, activityProcessor);
+                logger.info("Shared writes finished; committing batch: {}", deviceId);
+                connection.commit();
+                logger.info("Batch committed: {}", deviceId);
+                pendingTimeSeries = null;
+            } catch (Exception e) {
+                logger.error("Rolling back sensor/trajectory batch for {}", deviceId, e);
+                connection.rollback();
+                throw new RuntimeException("Failed to persist sensor and trajectory batch", e);
+            }
+        } catch (java.sql.SQLException e) {
+            throw new RuntimeException(e);
+        }
         logger.info("finish adding data to postgres tables");
     }
 
@@ -307,6 +339,11 @@ public class SmartphoneRecordingTask {
     }
 
     public void instantiate() {
+        try (java.sql.Connection connection = sensorLoggerPostgresClient.getConnection()) {
+            TrajectoryTableWriter.initialize(connection);
+        } catch (java.sql.SQLException e) {
+            throw new RuntimeException("Failed to initialize shared trajectory tables", e);
+        }
         initDeviceKgUsingOntop(sensorDataProcessors);
         initDevicesInRDB();
     }
