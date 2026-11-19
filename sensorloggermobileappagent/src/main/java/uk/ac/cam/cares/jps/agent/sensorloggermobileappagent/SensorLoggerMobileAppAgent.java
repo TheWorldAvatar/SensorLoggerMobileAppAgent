@@ -53,8 +53,8 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
                 endpointConfig.getDbpassword());
 
         timelineAuthentication = new TimelineAuthentication();
-        storeClient = new RemoteStoreClient(endpointConfig.getKgurl(), endpointConfig.getKgurl());
-        ontopClient = new RemoteStoreClient(endpointConfig.getOntopUrl());
+        storeClient = new RetryRemoteStoreClient(endpointConfig.getKgurl(), endpointConfig.getKgurl());
+        ontopClient = new RetryRemoteStoreClient(endpointConfig.getOntopUrl());
 
         queueConfig = new UploadQueueConfig();
         connectionPool = UploadConnectionPool.create(endpointConfig.getDburl(), endpointConfig.getDbuser(),
