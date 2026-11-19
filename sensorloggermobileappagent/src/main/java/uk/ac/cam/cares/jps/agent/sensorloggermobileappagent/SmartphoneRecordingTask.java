@@ -1,5 +1,12 @@
 package uk.ac.cam.cares.jps.agent.sensorloggermobileappagent;
 
+import org.apache.jena.arq.querybuilder.SelectBuilder;
+import org.apache.jena.query.Query;
+import org.apache.jena.sparql.core.Var;
+import org.apache.jena.sparql.expr.NodeValue;
+import org.apache.jena.sparql.syntax.ElementBind;
+import org.apache.jena.sparql.syntax.ElementGroup;
+import org.apache.jena.sparql.syntax.ElementUnion;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.logging.log4j.LogManager;
@@ -27,6 +34,7 @@ import java.util.stream.Collectors;
 
 import java.io.IOException;
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 public class SmartphoneRecordingTask {
     Logger logger;
@@ -43,6 +51,7 @@ public class SmartphoneRecordingTask {
 
     private final Node smartphoneIRI;
     private final String deviceId;
+    private final DeviceMetadataCache metadataCache;
 
     private final RemoteStoreClient ontopRemoteStoreClient;
     private final RemoteStoreClient blazegraphStoreClient;
@@ -68,7 +77,14 @@ public class SmartphoneRecordingTask {
     public SmartphoneRecordingTask(RemoteStoreClient storeClient, RemoteRDBStoreClient rdbStoreClient,
             AgentConfig config, String deviceId, RemoteStoreClient ontopRemoteStoreClient,
             SensorLoggerPostgresClient postgresClient) {
+        this(storeClient, rdbStoreClient, config, deviceId, ontopRemoteStoreClient, postgresClient, null);
+    }
+
+    SmartphoneRecordingTask(RemoteStoreClient storeClient, RemoteRDBStoreClient rdbStoreClient,
+            AgentConfig config, String deviceId, RemoteStoreClient ontopRemoteStoreClient,
+            SensorLoggerPostgresClient postgresClient, DeviceMetadataCache metadataCache) {
         logger = LogManager.getLogger("SmartphoneRecordingTask_" + deviceId);
+        this.metadataCache = metadataCache;
         this.sensorLoggerPostgresClient = java.util.Objects.requireNonNull(postgresClient);
 
         this.ontopRemoteStoreClient = ontopRemoteStoreClient;
@@ -92,6 +108,9 @@ public class SmartphoneRecordingTask {
         this.deviceId = deviceId;
 
         initSensorProcessors();
+        if (metadataCache == null) {
+            loadMetadata();
+        }
 
     }
 
@@ -121,29 +140,73 @@ public class SmartphoneRecordingTask {
         try {
             logger.info("Processing and sending data");
 
-            List<SensorDataProcessor> processorsToInstantiate = sensorDataProcessors.stream()
-                    .filter(SensorDataProcessor::isNeedToInstantiateDevice).toList();
-            if (!processorsToInstantiate.isEmpty()) {
-                logger.info("Need to init device: " + processorsToInstantiate.stream()
-                        .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
-                initDeviceKgUsingOntop(processorsToInstantiate);
-            }
-
-            List<SensorDataProcessor> processorsToInitTimeSeries = sensorDataProcessors.stream()
-                    .filter(SensorDataProcessor::isNeedToInitTimeSeries).toList();
-            if (!processorsToInitTimeSeries.isEmpty()) {
-                logger.info("Need to init rdb for " + processorsToInitTimeSeries.stream()
-                        .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
-                initDevicesInRDB();
-            }
-
-            fixUninitializedSensorData();
-
+            ensureMetadata();
             bulkAddTimeSeriesData();
         } finally {
             lastProcessedTime = System.currentTimeMillis();
             isProcessing = false;
         }
+    }
+
+    private void loadMetadata() {
+        resolveSensorDataIris(sensorDataProcessors, true);
+        resolveTimeSeriesIris(sensorDataProcessors);
+    }
+
+    private void ensureMetadata() {
+        if (metadataCache == null) {
+            initializeMissingMetadata();
+            return;
+        }
+
+        synchronized (metadataCache.lockFor(deviceId)) {
+            Map<String, List<String>> cached = metadataCache.get(deviceId);
+            if (cached != null) {
+                for (SensorDataProcessor processor : sensorDataProcessors) {
+                    List<String> iris = cached.get(processor.getSensorName());
+                    List<SensorData<?>> fields = processor.getSensorData();
+                    for (int i = 0; i < fields.size(); i++) {
+                        fields.get(i).setDataIri(iris.get(i));
+                    }
+                }
+                return;
+            }
+
+            loadMetadata();
+            initializeMissingMetadata();
+            Map<String, List<String>> metadata = new HashMap<>();
+            for (SensorDataProcessor processor : sensorDataProcessors) {
+                for (SensorData<?> field : processor.getSensorData()) {
+                    if (field.getDataIri() == null || field.getDataIri().isBlank()
+                            || field.isNeedToInitTimeSeries()) {
+                        throw new IllegalStateException("Sensor metadata is incomplete for " + deviceId);
+                    }
+                }
+                metadata.put(processor.getSensorName(), List.copyOf(processor.getDataIRIs()));
+            }
+            metadataCache.put(deviceId, metadata);
+        }
+    }
+
+
+    private void initializeMissingMetadata() {
+        List<SensorDataProcessor> processorsToInstantiate = sensorDataProcessors.stream()
+                .filter(SensorDataProcessor::isNeedToInstantiateDevice).toList();
+        if (!processorsToInstantiate.isEmpty()) {
+            logger.info("Need to init device: " + processorsToInstantiate.stream()
+                    .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
+            initDeviceKgUsingOntop(processorsToInstantiate);
+        }
+
+        List<SensorDataProcessor> processorsToInitTimeSeries = sensorDataProcessors.stream()
+                .filter(SensorDataProcessor::isNeedToInitTimeSeries).toList();
+        if (!processorsToInitTimeSeries.isEmpty()) {
+            logger.info("Need to init rdb for " + processorsToInitTimeSeries.stream()
+                    .map(SensorDataProcessor::getOntodeviceLabel).collect(Collectors.joining(",")));
+            initDevicesInRDB();
+        }
+
+        fixUninitializedSensorData();
     }
 
     public synchronized boolean shouldTerminateTask() {
@@ -153,22 +216,15 @@ public class SmartphoneRecordingTask {
     }
 
     private void initSensorProcessors() {
-        accelerometerProcessor = new AccelerometerProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient,
-                smartphoneIRI);
-        dbfsDataProcessor = new DBFSDataProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient,
-                smartphoneIRI);
-        gravityDataProcessor = new GravityDataProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient,
-                smartphoneIRI);
-        illuminationProcessor = new IlluminationProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient,
-                smartphoneIRI);
-        locationDataProcessor = new LocationDataProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient,
-                smartphoneIRI);
-        magnetometerDataProcessor = new MagnetometerDataProcessor(this.config, ontopRemoteStoreClient,
-                blazegraphStoreClient, smartphoneIRI);
-        relativeBrightnessProcessor = new RelativeBrightnessProcessor(this.config, ontopRemoteStoreClient,
-                blazegraphStoreClient, smartphoneIRI);
+        accelerometerProcessor = new AccelerometerProcessor(config, smartphoneIRI);
+        dbfsDataProcessor = new DBFSDataProcessor(config, smartphoneIRI);
+        gravityDataProcessor = new GravityDataProcessor(config, smartphoneIRI);
+        illuminationProcessor = new IlluminationProcessor(config, smartphoneIRI);
+        locationDataProcessor = new LocationDataProcessor(config, smartphoneIRI);
+        magnetometerDataProcessor = new MagnetometerDataProcessor(config, smartphoneIRI);
+        relativeBrightnessProcessor = new RelativeBrightnessProcessor(config, smartphoneIRI);
         // Always preserve raw activity observations in the source time series.
-        activityProcessor = new ActivityProcessor(this.config, ontopRemoteStoreClient, blazegraphStoreClient, smartphoneIRI);
+        activityProcessor = new ActivityProcessor(config, smartphoneIRI);
 
         sensorDataProcessors = new ArrayList<>(Arrays.asList(accelerometerProcessor,
                 dbfsDataProcessor,
@@ -178,6 +234,78 @@ public class SmartphoneRecordingTask {
                 magnetometerDataProcessor,
                 relativeBrightnessProcessor,
                 activityProcessor));
+    }
+
+    private void resolveSensorDataIris(List<SensorDataProcessor> processors, boolean allowUnmappedOntop) {
+        if (processors.isEmpty()) {
+            return;
+        }
+
+        Var sensor = Var.alloc("sensor");
+        Query query = new Query();
+        query.setQuerySelectType();
+        query.addResultVar(sensor);
+        ElementUnion union = new ElementUnion();
+        Map<String, SensorDataProcessor> pending = new HashMap<>();
+        Set<Var> resultVars = new LinkedHashSet<>();
+        for (SensorDataProcessor processor : processors) {
+            String sensorName = processor.getSensorName();
+            pending.put(sensorName, processor);
+            Query sensorQuery = processor.buildDataIriQuery().build();
+            resultVars.addAll(sensorQuery.getProjectVars());
+            query.getPrefixMapping().setNsPrefixes(sensorQuery.getPrefixMapping());
+            ElementGroup branch = new ElementGroup();
+            branch.addElement(sensorQuery.getQueryPattern());
+            branch.addElement(new ElementBind(sensor, NodeValue.makeString(sensorName)));
+            union.addElement(branch);
+        }
+        resultVars.forEach(query::addResultVar);
+        query.setQueryPattern(union);
+
+        JSONArray rows;
+        try {
+            rows = ontopRemoteStoreClient.executeQuery(query.toString());
+        } catch (RuntimeException e) {
+            if (!allowUnmappedOntop) {
+                throw e;
+            }
+            // Ontop can reject queries before its first mapping is installed.
+            logger.warn("Initial Ontop lookup failed for {}", deviceId, e);
+            return;
+        }
+        for (Object result : rows) {
+            JSONObject row = (JSONObject) result;
+            SensorDataProcessor processor = pending.remove(row.getString("sensor"));
+            if (processor != null) {
+                processor.applyDataIris(row);
+            }
+        }
+    }
+
+    private void resolveTimeSeriesIris(List<SensorDataProcessor> processors) {
+        List<String> dataIris = processors.stream()
+                .flatMap(processor -> processor.getDataIRIs().stream())
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        Map<String, String> timeSeriesByDataIri = new HashMap<>();
+        if (!dataIris.isEmpty()) {
+            Var dataIri = Var.alloc("dataIRI");
+            Var tsIri = Var.alloc("tsIRI");
+            SelectBuilder query = new SelectBuilder()
+                    .addPrefix("ontots", OntoConstants.ONTOTS)
+                    .setDistinct(true)
+                    .addVar(dataIri)
+                    .addVar(tsIri)
+                    .addWhere(dataIri, "ontots:hasTimeSeries", tsIri)
+                    .addValueVar(dataIri);
+            dataIris.forEach(iri -> query.addValueRow(NodeFactory.createURI(iri)));
+            for (Object result : blazegraphStoreClient.executeQuery(query.buildString())) {
+                JSONObject row = (JSONObject) result;
+                timeSeriesByDataIri.putIfAbsent(row.getString("dataIRI"), row.getString("tsIRI"));
+            }
+        }
+        processors.forEach(processor -> processor.applyTimeSeriesIris(timeSeriesByDataIri));
     }
 
     private void initDeviceKgUsingOntop(List<SensorDataProcessor> processors) {
@@ -210,16 +338,26 @@ public class SmartphoneRecordingTask {
             throw new RuntimeException("Interrupted during device initialization", e);
         }
 
-        sensorDataProcessors.forEach(s -> s.initIRIs());
+        List<SensorDataProcessor> unresolved = sensorDataProcessors.stream()
+                .filter(processor -> processor.getDataIRIs().contains(null))
+                .toList();
+        resolveSensorDataIris(unresolved, false);
+        if (unresolved.stream().anyMatch(processor -> processor.getDataIRIs().contains(null))) {
+            throw new IllegalStateException("Ontop sensor mappings are incomplete for " + deviceId);
+        }
+        resolveTimeSeriesIris(unresolved);
     }
 
     private void initDevicesInRDB() {
-        Iterator<SensorDataProcessor> iterator = sensorDataProcessors.stream()
-                .filter(SensorDataProcessor::isNeedToInitTimeSeries).iterator();
+        List<SensorDataProcessor> processors = sensorDataProcessors.stream()
+                .filter(SensorDataProcessor::isNeedToInitTimeSeries)
+                .toList();
+        if (processors.isEmpty()) {
+            return;
+        }
         List<List<String>> dataIris = new ArrayList<>();
         List<List<Class<?>>> dataClasses = new ArrayList<>();
-        while (iterator.hasNext()) {
-            SensorDataProcessor p = iterator.next();
+        for (SensorDataProcessor p : processors) {
             dataIris.add(p.getDataIRIs());
             dataClasses.add(p.getDataClass());
         }
@@ -227,9 +365,10 @@ public class SmartphoneRecordingTask {
         logger.info("bulk init iris in rdb");
         tsClient.bulkInitTimeSeries(dataIris, dataClasses, null, 4326);
 
-        sensorDataProcessors.stream()
-                .filter(SensorDataProcessor::isNeedToInitTimeSeries)
-                .forEach(SensorDataProcessor::getTimeSeriesIrisFromBlazegraph);
+        resolveTimeSeriesIris(processors);
+        if (processors.stream().anyMatch(SensorDataProcessor::isNeedToInitTimeSeries)) {
+            throw new IllegalStateException("Time-series links are missing after initialization for " + deviceId);
+        }
         logger.info("finish init postgres dbTable and the corresponding table");
     }
 

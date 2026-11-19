@@ -5,11 +5,10 @@ import org.apache.jena.arq.querybuilder.WhereBuilder;
 import org.apache.jena.graph.Node;
 import org.apache.jena.sparql.core.Var;
 import org.apache.logging.log4j.LogManager;
-import org.json.JSONArray;
+import org.json.JSONObject;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.AgentConfig;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.Payload;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.SensorData;
-import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
 
 import java.util.List;
 
@@ -19,8 +18,8 @@ public class DBFSDataProcessor extends SensorDataDownsampledProcessor {
 
     private SensorData<Double> dBFS;
 
-    public DBFSDataProcessor(AgentConfig config, RemoteStoreClient ontopClient, RemoteStoreClient blazegraphClient, Node smartphoneNode) {
-        super("DBFS", config, ontopClient, blazegraphClient, smartphoneNode, config.getDbfsDSResolution(), config.getDbfsDSType());
+    public DBFSDataProcessor(AgentConfig config, Node smartphoneNode) {
+        super("DBFS", config, smartphoneNode, config.getDbfsDSResolution(), config.getDbfsDSType());
         logger = LogManager.getLogger(DBFSDataProcessor.class);
     }
 
@@ -37,7 +36,7 @@ public class DBFSDataProcessor extends SensorDataDownsampledProcessor {
     }
 
     @Override
-    void getDataIrisFromKg() {
+    public SelectBuilder buildDataIriQuery() {
         Var varO = Var.alloc("o");
 
         WhereBuilder wb = new WhereBuilder()
@@ -51,19 +50,12 @@ public class DBFSDataProcessor extends SensorDataDownsampledProcessor {
                 .addWhere("?microphone", "ontodevice:measures", "?om_soundPressureLevel")
                 .addWhere("?om_soundPressureLevel", "om:hasValue", varO);
 
-        SelectBuilder sb = new SelectBuilder().addVar(varO).addWhere(wb);
+        return new SelectBuilder().addVar(varO).addWhere(wb);
+    }
 
-        JSONArray queryResult;
-        try {
-            queryResult = ontopClient.executeQuery(sb.buildString());
-        } catch (Exception e) {
-            // ontop does not accept queries before any mapping is added
-            return;
-        }
-        if (queryResult.isEmpty()) {
-            return;
-        }
-        dBFS.setDataIri(queryResult.getJSONObject(0).optString("o"));
+    @Override
+    public void applyDataIris(JSONObject row) {
+        dBFS.setDataIri(row.getString("o"));
     }
 
     @Override

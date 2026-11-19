@@ -4,13 +4,12 @@ import org.apache.jena.arq.querybuilder.SelectBuilder;
 import org.apache.jena.arq.querybuilder.WhereBuilder;
 import org.apache.jena.graph.Node;
 import org.apache.jena.sparql.core.Var;
-import org.json.JSONArray;
+import org.json.JSONObject;
 import org.postgis.Point;
 
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.AgentConfig;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.Payload;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.SensorData;
-import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
 import uk.ac.cam.cares.jps.base.timeseries.TimeSeries;
 
 import java.time.Instant;
@@ -27,9 +26,8 @@ public class LocationDataProcessor extends SensorDataProcessor {
     private SensorData<Point> geomLocation;
     private SensorData<String> session;
 
-    public LocationDataProcessor(AgentConfig config, RemoteStoreClient ontopClient, RemoteStoreClient blazegraphClient,
-            Node smartphoneIRINode) {
-        super("GPSDevice", config, ontopClient, blazegraphClient, smartphoneIRINode);
+    public LocationDataProcessor(AgentConfig config, Node smartphoneIRINode) {
+        super("GPSDevice", config, smartphoneIRINode);
     }
 
     @Override
@@ -67,7 +65,7 @@ public class LocationDataProcessor extends SensorDataProcessor {
     }
 
     @Override
-    void getDataIrisFromKg() {
+    public SelectBuilder buildDataIriQuery() {
         Var bearing = Var.alloc("bearing");
         Var altitude = Var.alloc("altitude");
         Var speed = Var.alloc("speed");
@@ -95,23 +93,17 @@ public class LocationDataProcessor extends SensorDataProcessor {
                 .addWhere("?GPSDevice", "ontodevice:hasGeoLocation", point)
                 .addWhere(point, "rdf:type", "sf:Point");
 
-        SelectBuilder sb = new SelectBuilder()
+        return new SelectBuilder()
                 .addVar(bearing).addVar(altitude).addVar(speed).addVar(point).addVar(session).addWhere(wb);
-        JSONArray queryResult;
-        try {
-            queryResult = ontopClient.executeQuery(sb.buildString());
-        } catch (Exception e) {
-            // ontop does not accept queries before any mapping is added
-            return;
-        }
-        if (queryResult.isEmpty()) {
-            return;
-        }
-        this.bearing.setDataIri(queryResult.getJSONObject(0).optString("bearing"));
-        this.altitude.setDataIri(queryResult.getJSONObject(0).optString("altitude"));
-        this.speed.setDataIri(queryResult.getJSONObject(0).optString("speed"));
-        this.geomLocation.setDataIri(queryResult.getJSONObject(0).optString("point"));
-        this.session.setDataIri(queryResult.getJSONObject(0).optString("session"));
+    }
+
+    @Override
+    public void applyDataIris(JSONObject row) {
+        this.bearing.setDataIri(row.getString("bearing"));
+        this.altitude.setDataIri(row.getString("altitude"));
+        this.speed.setDataIri(row.getString("speed"));
+        this.geomLocation.setDataIri(row.getString("point"));
+        this.session.setDataIri(row.getString("session"));
     }
 
     public String getPointIri() { return geomLocation.getDataIri(); }

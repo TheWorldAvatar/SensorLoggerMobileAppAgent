@@ -30,6 +30,7 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
     static final String INSTANTIATE_ROUTE = "/instantiate";
 
     private static final Logger LOGGER = LogManager.getLogger(SensorLoggerMobileAppAgent.class);
+    private final DeviceMetadataCache metadataCache = new DeviceMetadataCache(1024);
     private RemoteStoreClient storeClient;
     private RemoteStoreClient ontopClient;
     private RemoteRDBStoreClient rdbStoreClient;
@@ -109,9 +110,12 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
             return;
         }
 
-        SmartphoneRecordingTask task = new SmartphoneRecordingTask(storeClient, rdbStoreClient, agentConfig,
-                deviceId, ontopClient, postgresClient);
-        task.instantiate();
+        synchronized (metadataCache.lockFor(deviceId)) {
+            metadataCache.invalidate(deviceId);
+            SmartphoneRecordingTask task = new SmartphoneRecordingTask(storeClient, rdbStoreClient, agentConfig,
+                    deviceId, ontopClient, postgresClient);
+            task.instantiate();
+        }
         writeResponse(response, HttpServletResponse.SC_OK, "instantiated deviceId = " + deviceId);
     }
 
@@ -208,7 +212,7 @@ public class SensorLoggerMobileAppAgent extends HttpServlet {
             throw new RejectedUpload("Invalid compressed sensor payload: " + e.getMessage());
         }
         SmartphoneRecordingTask task = new SmartphoneRecordingTask(storeClient, rdbStoreClient, agentConfig,
-                deviceId, ontopClient, postgresClient);
+                deviceId, ontopClient, postgresClient, metadataCache);
         try {
             task.addData(new Payload(payload, request.getString("sessionId")));
         } catch (JSONException | IllegalArgumentException e) {
