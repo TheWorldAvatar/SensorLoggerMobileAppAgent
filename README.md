@@ -153,6 +153,8 @@ The SensorLogger mobile application can downloaded either from [GooglePlay](http
 
 ## 3. Agent Configuration
 
+`NAMESPACE` selects the Blazegraph namespace for time-series metadata reads and writes. It defaults to `kb` when unset or blank. To override it, set `NAMESPACE=<namespace>` in the agent's environment variable. Use the namespace that contains the device's existing time-series metadata.
+
 ### Timeline authentication
 
 The authenticated timeline endpoint requires these environment variables:

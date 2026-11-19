@@ -22,7 +22,8 @@ public class EndpointConfig {
 
     public EndpointConfig() {
         BlazegraphEndpointConfig blazegraphEndpointConfig = BlazegraphClient.getInstance().readEndpointConfig();
-        this.kgurl = blazegraphEndpointConfig.getUrl("kb");
+        String namespace = System.getenv("NAMESPACE");
+        this.kgurl = blazegraphEndpointConfig.getUrl(namespace == null || namespace.isBlank() ? "kb" : namespace.strip());
 
         PostGISEndpointConfig postGISEndpointConfig = PostGISClient.getInstance().readEndpointConfig();
         this.dburl = postGISEndpointConfig.getJdbcURL("postgres");
