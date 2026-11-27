@@ -5,11 +5,10 @@ import org.apache.jena.arq.querybuilder.WhereBuilder;
 import org.apache.jena.graph.Node;
 import org.apache.jena.sparql.core.Var;
 import org.apache.logging.log4j.LogManager;
-import org.json.JSONArray;
+import org.json.JSONObject;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.AgentConfig;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.Payload;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.SensorData;
-import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
 
 import java.util.List;
 
@@ -19,8 +18,8 @@ public class IlluminationProcessor extends SensorDataDownsampledProcessor {
 
     private SensorData<Double> illumination;
 
-    public IlluminationProcessor(AgentConfig config, RemoteStoreClient ontopClient, RemoteStoreClient blazegraphClient, Node smartphoneIRINode) {
-        super("Camera", config, ontopClient, blazegraphClient, smartphoneIRINode, config.getLightValueDSResolution(), config.getLightValueDSType());
+    public IlluminationProcessor(AgentConfig config, Node smartphoneIRINode) {
+        super("Camera", config, smartphoneIRINode, config.getLightValueDSResolution(), config.getLightValueDSType());
         logger = LogManager.getLogger(IlluminationProcessor.class);
     }
 
@@ -37,7 +36,7 @@ public class IlluminationProcessor extends SensorDataDownsampledProcessor {
     }
 
     @Override
-    void getDataIrisFromKg() {
+    public SelectBuilder buildDataIriQuery() {
         Var VAR_O = Var.alloc("o");
 
         WhereBuilder wb = new WhereBuilder()
@@ -51,19 +50,12 @@ public class IlluminationProcessor extends SensorDataDownsampledProcessor {
                 .addWhere("?camera", "ontodevice:measures", "?om_illuminance")
                 .addWhere("?om_illuminance", "om:hasValue", VAR_O);
 
-        SelectBuilder sb = new SelectBuilder().addVar(VAR_O).addWhere(wb);
+        return new SelectBuilder().addVar(VAR_O).addWhere(wb);
+    }
 
-        JSONArray queryResult;
-        try {
-            queryResult = ontopClient.executeQuery(sb.buildString());
-        } catch (Exception e) {
-            // ontop does not accept queries before any mapping is added
-            return;
-        }
-        if (queryResult.isEmpty()) {
-            return;
-        }
-        illumination.setDataIri(queryResult.getJSONObject(0).optString("o"));
+    @Override
+    public void applyDataIris(JSONObject row) {
+        illumination.setDataIri(row.getString("o"));
     }
 
     @Override

@@ -33,6 +33,7 @@ public class SensorLoggerPostgresClient {
     private String dburl;
     private String dbuser;
     private String dbpassword;
+    private javax.sql.DataSource dataSource;
     private static final Table<?> DSL_TABLE = DSL.table(DSL.name(DEVICES_TABLE));
     private static final Field<String> DEVICE_COLUMN_FIELD = DSL.field(DEVICE_COLUMN, String.class);
     private static final Field<String> SENSOR_COLUMN_FIELD = DSL.field(SENSOR_COLUMN, String.class);
@@ -45,14 +46,25 @@ public class SensorLoggerPostgresClient {
         this.dbpassword = dbpassword;
     }
 
+    SensorLoggerPostgresClient(javax.sql.DataSource dataSource) {
+        this.dataSource = java.util.Objects.requireNonNull(dataSource);
+    }
+
     public Connection getConnection() throws SQLException {
+        if (dataSource != null) return dataSource.getConnection();
         try {
             Class.forName("org.postgresql.Driver");
         } catch (ClassNotFoundException e) {
             LOGGER.error(e.getMessage());
             LOGGER.error("Failed to load Postgres driver");
         }
-        return DriverManager.getConnection(dburl, dbuser, dbpassword);
+        java.util.Properties properties = new java.util.Properties();
+        if (dbuser != null) properties.setProperty("user", dbuser);
+        if (dbpassword != null) properties.setProperty("password", dbpassword);
+        properties.setProperty("connectTimeout", "10");
+        properties.setProperty("socketTimeout", "60");
+        properties.setProperty("tcpKeepAlive", "true");
+        return DriverManager.getConnection(dburl, properties);
     }
 
     DSLContext getContext(Connection conn) {
@@ -63,6 +75,7 @@ public class SensorLoggerPostgresClient {
         String sql = "SELECT EXISTS (SELECT 1 FROM timeline.\"smartPhone\" "
                 + "WHERE phone_id = ? AND user_id = ?)";
         try (Connection conn = getConnection(); PreparedStatement statement = conn.prepareStatement(sql)) {
+            statement.setQueryTimeout(15);
             statement.setString(1, phoneId);
             statement.setString(2, userId);
             try (ResultSet result = statement.executeQuery()) {

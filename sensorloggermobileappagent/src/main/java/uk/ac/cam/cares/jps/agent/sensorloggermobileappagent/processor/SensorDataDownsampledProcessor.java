@@ -4,7 +4,6 @@ import org.apache.jena.graph.Node;
 import uk.ac.cam.cares.downsampling.Downsampling;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.AgentConfig;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.SensorData;
-import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
 import uk.ac.cam.cares.jps.base.timeseries.TimeSeries;
 
 import java.time.OffsetDateTime;
@@ -22,11 +21,10 @@ public abstract class SensorDataDownsampledProcessor extends SensorDataProcessor
     private Long dsResolution;
     private Downsampling.Type dsType;
 
-    public SensorDataDownsampledProcessor(String sensorName, AgentConfig config, RemoteStoreClient ontopClient,
-            RemoteStoreClient blazegraphClient, Node smartphoneIRINode,
+    public SensorDataDownsampledProcessor(String sensorName, AgentConfig config, Node smartphoneIRINode,
             Long dsResolution,
             Downsampling.Type dsType) {
-        super(sensorName, config, ontopClient, blazegraphClient, smartphoneIRINode);
+        super(sensorName, config, smartphoneIRINode);
         this.dsResolution = dsResolution;
         this.dsType = dsType;
     }

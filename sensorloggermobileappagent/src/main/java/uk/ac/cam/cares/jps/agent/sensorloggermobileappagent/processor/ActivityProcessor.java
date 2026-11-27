@@ -5,11 +5,10 @@ import org.apache.jena.arq.querybuilder.WhereBuilder;
 import org.apache.jena.graph.Node;
 import org.apache.jena.sparql.core.Var;
 import org.apache.logging.log4j.LogManager;
-import org.json.JSONArray;
+import org.json.JSONObject;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.AgentConfig;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.Payload;
 import uk.ac.cam.cares.jps.agent.sensorloggermobileappagent.model.SensorData;
-import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
 import uk.ac.cam.cares.jps.base.timeseries.TimeSeries;
 
 import java.time.Instant;
@@ -23,9 +22,8 @@ public class ActivityProcessor extends SensorDataProcessor {
     private SensorData<Integer> confidence;
     private SensorData<String> activityType;
 
-    public ActivityProcessor(AgentConfig config, RemoteStoreClient ontopClient, RemoteStoreClient blazegraphClient,
-            Node smartphoneIRINode) {
-        super("Activity", config, ontopClient, blazegraphClient, smartphoneIRINode);
+    public ActivityProcessor(AgentConfig config, Node smartphoneIRINode) {
+        super("Activity", config, smartphoneIRINode);
         logger = LogManager.getLogger(ActivityProcessor.class);
     }
 
@@ -57,7 +55,7 @@ public class ActivityProcessor extends SensorDataProcessor {
     }
 
     @Override
-    void getDataIrisFromKg() {
+    public SelectBuilder buildDataIriQuery() {
         Var confidence = Var.alloc("confidence");
         Var activityType = Var.alloc("activityType");
 
@@ -71,22 +69,18 @@ public class ActivityProcessor extends SensorDataProcessor {
                 .addWhere("?activity", "ontodevice:hasConfidenceLevel", confidence)
                 .addWhere("?activity", "ontodevice:hasActivityType", activityType);
 
-        SelectBuilder sb = new SelectBuilder()
+        return new SelectBuilder()
                 .addVar(confidence).addVar(activityType).addWhere(wb);
-
-        JSONArray queryResult;
-        try {
-            queryResult = ontopClient.executeQuery(sb.buildString());
-        } catch (Exception e) {
-            // ontop does not accept queries before any mapping is added
-            return;
-        }
-        if (queryResult.isEmpty()) {
-            return;
-        }
-        this.confidence.setDataIri(queryResult.getJSONObject(0).optString("confidence"));
-        this.activityType.setDataIri(queryResult.getJSONObject(0).optString("activityType"));
     }
+
+    @Override
+    public void applyDataIris(JSONObject row) {
+        this.confidence.setDataIri(row.getString("confidence"));
+        this.activityType.setDataIri(row.getString("activityType"));
+    }
+
+    public String getActivityTypeIri() { return activityType.getDataIri(); }
+    public String getConfidenceIri() { return confidence.getDataIri(); }
 
     @Override
     public String getOntodeviceLabel() {
